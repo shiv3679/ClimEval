@@ -1,0 +1,7 @@
+numpy
+xarray
+dask
+scipy
+matplotlib
+cartopy
+pytest

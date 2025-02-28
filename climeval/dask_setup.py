@@ -1,4 +1,31 @@
-#!/usr/bin/env python3
+"""
+veriftool.backend
+=================
+This module provides functions to compare a climate model vs. observation data:
+ - Dask cluster setup (CPU/GPU)
+ - NetCDF loading with chunking
+ - Regridding / dimension checks
+ - Domain-wide metrics (continuous, event-based, probabilistic, distribution-level)
+ - Per-pixel (gridwise) metrics for bias maps, correlation maps, event detection maps
+ - Basic cartopy-based visualization functions
+
+Example usage (within Python):
+
+    from veriftool.backend import (
+        init_dask_cluster,
+        open_dataset_with_chunks,
+        detect_or_fix_mismatch,
+        compute_continuous_metrics,
+        # ...
+    )
+
+    client = init_dask_cluster(use_gpu=False, n_workers=2)
+    model_ds = open_dataset_with_chunks("path/to/model.nc", chunks={'time':10,'lat':200,'lon':200})
+    obs_ds   = open_dataset_with_chunks("path/to/obs.nc")
+    model_ds, obs_ds = detect_or_fix_mismatch(model_ds, obs_ds)
+    # Then pick variables and compute your metrics, etc.
+
+"""
 
 import os
 import sys
@@ -7,15 +34,10 @@ import numpy as np
 import xarray as xr
 import dask.array as da
 import matplotlib.pyplot as plt
-
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-
 from scipy.stats import wasserstein_distance
 from scipy.spatial.distance import jensenshannon
-
-# Dask distributed for parallelism
-from dask.distributed import Client, LocalCluster
 
 # Attempt to import CuPy for GPU usage
 try:
@@ -24,14 +46,28 @@ try:
 except ImportError:
     GPU_AVAILABLE = False
 
+from dask.distributed import Client, LocalCluster
+
 
 ##############################################################################
-#                        DASK & GPU SETUP
+# 1. DASK & GPU SETUP
 ##############################################################################
 
 def init_dask_cluster(use_gpu: bool = False, n_workers: int = 1):
     """
-    Initializes a local Dask cluster (CPU or GPU).
+    Initializes a local Dask cluster for parallel computation.
+
+    Parameters
+    ----------
+    use_gpu : bool
+        If True and CuPy is installed, attempts to create a GPU-based cluster.
+    n_workers : int
+        Number of workers in the local cluster.
+
+    Returns
+    -------
+    client : dask.distributed.Client
+        A Dask client connected to the newly created cluster.
     """
     if use_gpu:
         print("Initializing Dask LocalCluster for GPU usage...")
@@ -55,6 +91,20 @@ def open_dataset_with_chunks(path, chunks=None, use_gpu=False):
     """
     Opens a NetCDF file with xarray, applying Dask chunking.
     If use_gpu=True and CuPy is available, convert blocks to CuPy arrays.
+
+    Parameters
+    ----------
+    path : str
+        Path to the NetCDF file.
+    chunks : dict, optional
+        Dask chunk sizes, e.g. {'time':10, 'lat':200, 'lon':200}.
+    use_gpu : bool
+        If True, attempt CuPy-based arrays.
+
+    Returns
+    -------
+    ds : xarray.Dataset
+        The opened and chunked dataset.
     """
     if chunks is None:
         chunks = {'time': 10, 'lat': 200, 'lon': 200}
@@ -71,14 +121,29 @@ def open_dataset_with_chunks(path, chunks=None, use_gpu=False):
 
     return ds
 
+
 ##############################################################################
-#                REGRID & DIMENSION CHECK
+# 2. REGRID & DIMENSION CHECK
 ##############################################################################
 
 def detect_or_fix_mismatch(model_ds, obs_ds, required_dims=('time','lat','lon')):
     """
-    Checks dimension mismatch. If mismatch, user can choose to regrid or exit.
-    Returns updated (model_ds, obs_ds).
+    Checks dimension mismatch for the specified dims (time, lat, lon).
+    If mismatch is detected, interactively prompts user to regrid or exit.
+
+    Parameters
+    ----------
+    model_ds : xarray.Dataset
+        The model dataset.
+    obs_ds : xarray.Dataset
+        The observation dataset.
+    required_dims : tuple
+        Dimensions to check for consistency (time, lat, lon).
+
+    Returns
+    -------
+    model_ds, obs_ds : xarray.Dataset
+        Potentially regridded datasets that match in size/coords.
     """
     for dim in required_dims:
         if dim not in model_ds.dims:
@@ -134,13 +199,18 @@ def detect_or_fix_mismatch(model_ds, obs_ds, required_dims=('time','lat','lon'))
 
 
 ##############################################################################
-#                   PER-TIME AGGREGATE METRICS
+# 3. PER-TIME AGGREGATE METRICS
 ##############################################################################
 
 def compute_continuous_metrics(model_data, obs_data):
     """
-    Domain-wide MSE, MAE, Bias, Corr (flatten over space,time).
-    Dask-based, returns scalar results.
+    Computes domain-wide MSE, MAE, Bias, and Correlation (flattened).
+
+    Returns a dictionary of scalar metrics:
+      - MSE
+      - MAE
+      - Bias
+      - Corr
     """
     m_arr = model_data.data.reshape(-1)
     o_arr = obs_data.data.reshape(-1)
@@ -167,12 +237,19 @@ def compute_continuous_metrics(model_data, obs_data):
 
 def compute_event_metrics(model_data, obs_data, threshold=1.0):
     """
-    Domain-wide event-based metrics: POD, FAR, CSI, ETS, FSS (flatten).
+    Domain-wide event-based metrics (flattened):
+      - POD
+      - FAR
+      - CSI
+      - ETS
+      - FSS (placeholder, simplified)
+
+    `threshold` defines what counts as an event: data >= threshold -> 1, else 0.
     """
     m_flat = model_data.data.reshape(-1)
     o_flat = obs_data.data.reshape(-1)
 
-    # Convert to 0/1 (requires .compute() eventually):
+    # Convert to 0/1
     m_arr = (m_flat >= threshold).astype(int).compute()
     o_arr = (o_flat >= threshold).astype(int).compute()
 
@@ -192,19 +269,29 @@ def compute_event_metrics(model_data, obs_data, threshold=1.0):
     else:
         ets = (hits - hits_rand)/ets_denom
 
-    # Simplified FSS
+    # Simplified fraction skill score
     fss_num = np.mean((m_arr - o_arr)**2)
     fss_den = np.mean(m_arr**2) + np.mean(o_arr**2)
     fss = 1 - fss_num/fss_den if fss_den!=0 else np.nan
 
     return {
-        'POD': pod, 'FAR': far, 'CSI': csi, 'ETS': ets, 'FSS': fss
+        'POD': pod,
+        'FAR': far,
+        'CSI': csi,
+        'ETS': ets,
+        'FSS': fss
     }
 
 
 def compute_probabilistic_metrics(model_prob, obs_event):
     """
-    Domain-wide Brier Score, BSS, placeholder RPSS.
+    Domain-wide probabilistic metrics:
+      - Brier Score (BS)
+      - Brier Skill Score (BSS)
+      - RPSS (placeholder, currently NaN)
+
+    `model_prob` is a DataArray of predicted probabilities (0..1).
+    `obs_event` is a 0/1 array for whether event occurred.
     """
     p_arr = model_prob.data.reshape(-1)
     o_arr = obs_event.data.reshape(-1).astype(float)
@@ -212,7 +299,6 @@ def compute_probabilistic_metrics(model_prob, obs_event):
     bs_dask = ((p_arr - o_arr)**2).mean()
     bs_val = bs_dask.compute()
 
-    # reference
     mean_obs = np.mean(o_arr)
     bs_ref = np.mean((mean_obs - o_arr)**2)
     bss_val = np.nan if bs_ref==0 else 1 - bs_val/bs_ref
@@ -226,9 +312,11 @@ def compute_probabilistic_metrics(model_prob, obs_event):
 
 def compute_distribution_metrics(model_data, obs_data, bins=50):
     """
-    Domain-wide distribution metrics: 
-    - Wasserstein distance
-    - Jensen-Shannon divergence
+    Domain-wide distribution-based metrics:
+      - Wasserstein distance
+      - Jensen-Shannon divergence
+
+    Hist-based approach for JS. For large data, might need to chunk carefully.
     """
     m_arr_dask = model_data.data.reshape(-1)
     o_arr_dask = obs_data.data.reshape(-1)
@@ -242,27 +330,26 @@ def compute_distribution_metrics(model_data, obs_data, bins=50):
     o_hist, _     = np.histogram(o_arr, bins=bins, range=(min_val, max_val), density=True)
     js_dist = jensenshannon(m_hist, o_hist)
 
-    return {'Wasserstein': wdist, 'JensenShannon': js_dist}
+    return {
+        'Wasserstein': wdist,
+        'JensenShannon': js_dist
+    }
 
 
 ##############################################################################
-#               PER-PIXEL (GRIDWISE) METRICS ACROSS TIME
+# 4. PER-PIXEL (GRIDWISE) METRICS ACROSS TIME
 ##############################################################################
 
 def compute_gridwise_continuous(model_da, obs_da):
     """
     Returns an xarray.Dataset with:
-      - 'bias_map' (lat, lon)
-      - 'mae_map'  (lat, lon)
-      - 'mse_map'  (lat, lon)
-      - 'corr_map' (lat, lon) [corr over the time dimension]
-    This allows the user to see how these metrics vary spatially.
+      - bias_map, mae_map, mse_map, corr_map
+    Each is (lat, lon) computed over the time dimension.
     """
     bias_map = (model_da - obs_da).mean(dim='time')
-    mae_map  = np.abs(model_da - obs_da).mean(dim='time')  # Use np.abs
+    mae_map  = np.abs(model_da - obs_da).mean(dim='time')
     mse_map  = ((model_da - obs_da)**2).mean(dim='time')
 
-    # correlation across time dimension
     model_mean = model_da.mean(dim='time')
     obs_mean   = obs_da.mean(dim='time')
     model_anom = model_da - model_mean
@@ -278,25 +365,20 @@ def compute_gridwise_continuous(model_da, obs_da):
         "mse_map": mse_map,
         "corr_map": corr_map
     })
-    ds.attrs["description"] = "Per-pixel continuous metrics across time."
+    ds.attrs["description"] = "Per-pixel continuous metrics (time dimension collapsed)."
     return ds
 
 
 def compute_gridwise_event_metrics(model_da, obs_da, threshold=1.0):
     """
     Returns an xarray.Dataset with:
-      - 'POD_map' (lat, lon)
-      - 'FAR_map' (lat, lon)
-      - 'CSI_map' (lat, lon)
-      - 'ETS_map' (lat, lon)
+      - POD_map, FAR_map, CSI_map, ETS_map
 
-    For each pixel, we threshold the model and obs, then sum
-    hits, misses, false alarms over time.
+    Threshold-based event detection across time dimension.
     """
     model_event = (model_da >= threshold).astype(int)
     obs_event   = (obs_da   >= threshold).astype(int)
 
-    # Summation across time => hits, misses, false alarms
     hits  = (model_event * obs_event).sum(dim='time')
     mod_sum = model_event.sum(dim='time')
     obs_sum = obs_event.sum(dim='time')
@@ -309,16 +391,10 @@ def compute_gridwise_event_metrics(model_da, obs_da, threshold=1.0):
 
     time_length = model_da.sizes['time']
 
-    # Probability of Detection (POD)
     pod_map = hits_f / (hits_f + misses_f)
-
-    # False Alarm Ratio (FAR)
-    far_map = fa_f / (hits_f + fa_f)
-
-    # CSI
+    far_map = fa_f   / (hits_f + fa_f)
     csi_map = hits_f / (hits_f + misses_f + fa_f)
 
-    # ETS
     hits_rand = (obs_sum * mod_sum) / float(time_length)
     ets_denom = (hits_f + misses_f + fa_f - hits_rand)
     ets_map   = (hits_f - hits_rand) / ets_denom
@@ -329,17 +405,18 @@ def compute_gridwise_event_metrics(model_da, obs_da, threshold=1.0):
         "CSI_map": csi_map,
         "ETS_map": ets_map,
     })
-    ds.attrs["description"] = f"Gridwise event-based metrics (threshold={threshold})."
+    ds.attrs["description"] = f"Gridwise event-based metrics, threshold={threshold}"
     return ds
 
 
 ##############################################################################
-#                           VISUALIZATION
+# 5. (Optional) VISUALIZATION FUNCTIONS
 ##############################################################################
 
 def visualize_map(model_data, obs_data, time_index=0):
     """
-    Just a quick side-by-side plot of model vs. obs at a single time slice.
+    Quick side-by-side plot of model vs. obs at a single time slice.
+    Shows how the fields compare visually (cartopy).
     """
     m_slice = model_data.isel(time=time_index).compute()
     o_slice = obs_data.isel(time=time_index).compute()
@@ -373,8 +450,8 @@ def visualize_map(model_data, obs_data, time_index=0):
 
 def visualize_metric_map(metric_da, title_str="", cmap="viridis", center=None):
     """
-    Plots a single (lat, lon) DataArray using Cartopy.
-    If 'center' is not None, we might use a diverging colormap with center=0.
+    Plots a single lat-lon DataArray metric using cartopy.
+    If center is not None, uses a diverging colormap around that center.
     """
     proj = ccrs.PlateCarree()
     fig = plt.figure(figsize=(8,6))
@@ -391,7 +468,6 @@ def visualize_metric_map(metric_da, title_str="", cmap="viridis", center=None):
         "cbar_kwargs": {"label": metric_da.name}
     }
     if center is not None:
-        # e.g. center=0 for bias, correlation
         kwargs["center"] = center
 
     metric_da.plot(ax=ax, **kwargs)
@@ -399,155 +475,3 @@ def visualize_metric_map(metric_da, title_str="", cmap="viridis", center=None):
     plt.show()
 
 
-##############################################################################
-#                             MAIN
-##############################################################################
-
-def main():
-    print("=== Model vs. Observation Verification (Per-Pixel Metrics) ===\n")
-
-    # 1. GPU usage
-    use_gpu_input = input("Use GPU acceleration? (y/n) [default=n]: ").strip().lower()
-    use_gpu = (use_gpu_input == 'y')
-    if use_gpu and not GPU_AVAILABLE:
-        print("GPU requested but CuPy not found; continuing on CPU.")
-        use_gpu = False
-
-    # 2. Dask workers
-    worker_str = input("Number of Dask workers [default=1]: ").strip()
-    n_workers = int(worker_str) if worker_str else 1
-    client = init_dask_cluster(use_gpu=use_gpu, n_workers=n_workers)
-
-    # 3. Paths
-    model_path = input("Path to MODEL dataset: ").strip()
-    obs_path   = input("Path to OBS dataset: ").strip()
-    if not os.path.isfile(model_path):
-        sys.exit(f"Model file not found: {model_path}")
-    if not os.path.isfile(obs_path):
-        sys.exit(f"Obs file not found: {obs_path}")
-
-    # 4. Chunking
-    chunk_str = input("Chunk sizes 'time,lat,lon' [default=10,200,200]: ").strip()
-    if chunk_str:
-        try:
-            tchunk, lchunk, lochunk = chunk_str.split(',')
-            chunks = {'time': int(tchunk), 'lat': int(lchunk), 'lon': int(lochunk)}
-        except:
-            print("Invalid chunk format; using default.")
-            chunks = None
-    else:
-        chunks = None
-
-    model_ds = open_dataset_with_chunks(model_path, chunks=chunks, use_gpu=use_gpu)
-    obs_ds   = open_dataset_with_chunks(obs_path,   chunks=chunks, use_gpu=use_gpu)
-
-    # 5. Dimension check / regrid
-    try:
-        model_ds, obs_ds = detect_or_fix_mismatch(model_ds, obs_ds)
-    except (ValueError, KeyError) as e:
-        sys.exit(f"Dimension mismatch error: {e}")
-
-    # 6. Pick variable
-    model_vars = list(model_ds.data_vars.keys())
-    if not model_vars:
-        sys.exit("No variables in model dataset.")
-    print("\nAvailable model variables:")
-    for i,v in enumerate(model_vars):
-        print(f"[{i}] {v}")
-    var_choice = input("Select variable index or name: ").strip()
-    if var_choice.isdigit():
-        idx = int(var_choice)
-        if idx < 0 or idx >= len(model_vars):
-            sys.exit("Invalid variable index.")
-        variable_name = model_vars[idx]
-    else:
-        variable_name = var_choice
-
-    if variable_name not in model_ds.data_vars:
-        sys.exit(f"Variable '{variable_name}' not in model dataset.")
-    if variable_name not in obs_ds.data_vars:
-        sys.exit(f"Variable '{variable_name}' not in obs dataset.")
-    
-    model_da = model_ds[variable_name]
-    obs_da   = obs_ds[variable_name]
-
-    # 7. Quick visualization
-    t_str = input("\nTime index to visualize [default=0]: ").strip()
-    time_index = int(t_str) if t_str else 0
-    try:
-        visualize_map(model_da, obs_da, time_index=time_index)
-    except Exception as ex:
-        print("Visualization error:", ex)
-
-    # 8. Basic domain-wide metrics
-    metric_str = input("\nWhich domain-wide metrics do you want? (1=Cont,2=Event,3=Prob,4=Dist) e.g. '1,2': ").strip()
-    picks = [x.strip() for x in metric_str.split(',') if x.strip()]
-    # Continuous
-    if '1' in picks:
-        cont = compute_continuous_metrics(model_da, obs_da)
-        print("\n-- Domain-wide Continuous Metrics --")
-        for k,v in cont.items():
-            print(f"{k}: {v:.4f}")
-    # Event
-    if '2' in picks:
-        thr_str = input("Threshold for event-based [default=1.0]: ").strip()
-        threshold = float(thr_str) if thr_str else 1.0
-        evt = compute_event_metrics(model_da, obs_da, threshold=threshold)
-        print("\n-- Domain-wide Event Metrics --")
-        for k,v in evt.items():
-            print(f"{k}: {v:.4f}" if isinstance(v,float) else f"{k}: {v}")
-    # Prob
-    if '3' in picks:
-        prob_q = input("Is model data probability? (y/n) [default=n]: ").strip().lower()
-        if prob_q=='y':
-            obs_thr_s = input("Obs threshold for 0/1 [default=0.5]: ").strip()
-            obs_thr = float(obs_thr_s) if obs_thr_s else 0.5
-            obs_ev   = (obs_da >= obs_thr).astype(int)
-            prob_res = compute_probabilistic_metrics(model_da, obs_ev)
-            print("\n-- Domain-wide Probabilistic Metrics --")
-            for k,v in prob_res.items():
-                print(f"{k}: {v:.4f}" if isinstance(v,float) else f"{k}: {v}")
-        else:
-            print("Skipping prob metrics; data not probability.")
-    # Dist
-    if '4' in picks:
-        dist = compute_distribution_metrics(model_da, obs_da)
-        print("\n-- Domain-wide Distribution Metrics --")
-        for k,v in dist.items():
-            print(f"{k}: {v:.4f}")
-
-    # 9. Per-pixel (gridwise) metrics across time
-    print("\nDo you want per-pixel metrics (2D lat-lon maps) over time? (y/n) [default=n]")
-    gridwise_ans = input().strip().lower()
-    if gridwise_ans == 'y':
-        # A) Continuous
-        print("Calculating gridwise continuous metrics... (bias, mae, mse, corr)")
-        grid_cont = compute_gridwise_continuous(model_da, obs_da).compute()
-        # For demonstration, let's just plot each map
-        visualize_metric_map(grid_cont["bias_map"],  title_str="Bias Map",  cmap="RdBu", center=0)
-        visualize_metric_map(grid_cont["mae_map"],   title_str="MAE Map",   cmap="Reds")
-        visualize_metric_map(grid_cont["mse_map"],   title_str="MSE Map",   cmap="Reds")
-        visualize_metric_map(grid_cont["corr_map"],  title_str="Correlation Map", cmap="RdBu", center=0)
-
-        # B) Event-based
-        thr_str = input("\nThreshold for gridwise event-based metrics? [default=1.0]: ").strip()
-        threshold = float(thr_str) if thr_str else 1.0
-        print("Calculating gridwise event-based metrics... (POD, FAR, CSI, ETS)")
-        grid_evt = compute_gridwise_event_metrics(model_da, obs_da, threshold=threshold).compute()
-
-        # Visualize
-        visualize_metric_map(grid_evt["POD_map"], title_str="POD Map", cmap="Blues")
-        visualize_metric_map(grid_evt["FAR_map"], title_str="FAR Map", cmap="Reds")
-        visualize_metric_map(grid_evt["CSI_map"], title_str="CSI Map", cmap="Greens")
-        visualize_metric_map(grid_evt["ETS_map"], title_str="ETS Map", cmap="RdBu", center=0)
-
-        # Optionally save to NetCDF
-        # grid_cont.to_netcdf("gridwise_continuous_metrics.nc")
-        # grid_evt.to_netcdf("gridwise_event_metrics.nc")
-
-    print("\nDone! Monitor Dask dashboard for performance details.")
-    client.close()
-
-
-# if __name__=="__main__":
-#     main()
