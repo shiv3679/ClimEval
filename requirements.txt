@@ -6,3 +6,4 @@ matplotlib
 cartopy
 pytest
 dask[distributed]
+cftime
