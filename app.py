@@ -20,34 +20,40 @@ from backend import (
     compute_gridwise_event_metrics
 )
 
+# Increase the file upload limit (in megabytes)
+# st.set_option("server.maxUploadSize", 500)  # Set to 500 MB (adjust as needed)
+
+
+
+# Streamlit GUI Function
 def main():
-    st.title("EvalMetrics: Precision in Prediction")
-    st.write("Use this interface to load your NetCDF files, choose metrics, and visualize results.")
+    st.title("🌍 ClimEval: Climate Model Verification Tool")
+    st.write("Analyze climate models against observations with automated metrics & visualization.")
 
-    # 1. GPU usage
-    use_gpu = st.checkbox("Use GPU acceleration? (Requires CuPy)", value=False)
-    # 2. Dask workers
-    n_workers = st.number_input("Number of Dask Workers", min_value=1, max_value=64, value=1)
+    # Sidebar Setup
+    st.sidebar.header("🔧 Settings")
+    use_gpu = st.sidebar.checkbox("Use GPU Acceleration (Requires CuPy)", value=False)
+    n_workers = st.sidebar.slider("Number of Dask Workers", min_value=1, max_value=16, value=2)
 
-    # 3. File uploads
-    st.subheader("Upload Your NetCDF Datasets")
-    model_file = st.file_uploader("Model NetCDF", type=["nc"])
-    obs_file   = st.file_uploader("Observation NetCDF", type=["nc"])
-    
-    # 4. Chunk sizes
-    st.subheader("Chunk Sizes")
-    chunk_time = st.number_input("Time chunk size", value=10)
-    chunk_lat  = st.number_input("Lat chunk size", value=200)
-    chunk_lon  = st.number_input("Lon chunk size", value=200)
+    # File Uploads
+    st.subheader("📂 Upload Your NetCDF Datasets")
+    model_file = st.file_uploader("Upload Model NetCDF", type=["nc"])
+    obs_file = st.file_uploader("Upload Observation NetCDF", type=["nc"])
+
+    # Chunk Sizes
+    st.sidebar.subheader("⚙️ Chunk Sizes (Dask Optimization)")
+    chunk_time = st.sidebar.number_input("Time chunk size", value=10)
+    chunk_lat = st.sidebar.number_input("Lat chunk size", value=200)
+    chunk_lon = st.sidebar.number_input("Lon chunk size", value=200)
     chunks = {"time": chunk_time, "lat": chunk_lat, "lon": chunk_lon}
 
-    # We'll store objects in Streamlit session_state to avoid re-loading repeatedly
+    # Session State Initialization
+    if "client" not in st.session_state:
+        st.session_state["client"] = None
     if "model_ds" not in st.session_state:
         st.session_state["model_ds"] = None
     if "obs_ds" not in st.session_state:
         st.session_state["obs_ds"] = None
-    if "client" not in st.session_state:
-        st.session_state["client"] = None
 
     # Button to load datasets
     if st.button("Load & (Optionally) Regrid"):

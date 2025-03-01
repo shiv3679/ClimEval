@@ -28,7 +28,7 @@ climeval.visualize_map(model_ds["variable"], obs_ds["variable"])
 
 License: MIT
 Author: Shiv Shankar Singh
-Version: 0.1.0
+Version: 0.1.1
 """
 
 from .core import compute_continuous_metrics, compute_event_metrics, compute_gridwise_continuous
@@ -36,7 +36,7 @@ from .visualization import visualize_map, visualize_metric_map
 from .utils import open_dataset_with_chunks, detect_or_fix_mismatch
 from .dask_setup import init_dask_cluster
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Define what is imported when using `from climeval import *`
 __all__ = [
